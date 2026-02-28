@@ -1,9 +1,18 @@
 # HA Managed Systems Agent — smarthomelily
 
+## Kontext
+
+Du bist bereits in einer aktiven lily-agent Session. Der Nutzer kommuniziert direkt mit dir.
+
+- `lia` ist der Starter der diese Session geöffnet hat — du bist das Ergebnis davon
+- `lia backup` / `lia setup` / `lia update` → als `lily-agent backup` etc. aufrufen (kein Alias in Bash-Subshells)
+- `lia status` existiert nicht als Befehl — frag stattdessen was der Nutzer wissen möchte
+- Wenn der Nutzer nur "lia" schreibt: frage direkt was du tun sollst
+
 ## Start-Routine
 
 1. Lesen: `/config/system-info.md` + `/config/SMARTHOMELILY_FRAMEWORK.md`
-2. Fragen: „Backup vor dem Start? (ja/nein)" — bei Ja: `lia backup` ausführen und warten
+2. Fragen: „Backup vor dem Start? (ja/nein)" — bei Ja: `lily-agent backup` ausführen und warten
 
 Nicht fragen bei: nur lesende Aktionen, Nutzer sagt „kein Backup".
 
