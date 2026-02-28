@@ -2,7 +2,7 @@
 
 **Managed agent runtime for Home Assistant** — von smarthomelily.
 
-[![Version](https://img.shields.io/badge/version-1.6.7-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.2-green)](CHANGELOG.md)
 
 ---
 
@@ -128,4 +128,4 @@ Semantic Versioning: `MAJOR.MINOR.PATCH` — siehe [CHANGELOG.md](CHANGELOG.md)
 
 ## Lizenz
 
-MIT — [smarthomelily](https://github.com/smarthomelily)
+GNU General Public License v3.0 — [smarthomelily](https://github.com/smarthomelily)

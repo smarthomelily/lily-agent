@@ -7,7 +7,7 @@
 #   - Dateiänderungen überwachen (inotifywait)
 #   - Idle-Watchdog: Addon stopp nach 10 Min ohne Aktivität
 
-VERSION="1.7.1"  # Increment on every change: MAJOR.MINOR.PATCH
+VERSION="1.7.2"  # Increment on every change: MAJOR.MINOR.PATCH
 GITHUB_REPO="smarthomelily/lily-agent"
 
 # ── Konfiguration ────────────────────────────────────────────────────────────
@@ -186,6 +186,13 @@ fi
 # ── Auto-Update (1x täglich von GitHub) ──────────────────────────────────────
 # Source: https://github.com/smarthomelily/lily-agent
 
+# ── Guard: kein Start innerhalb einer Claude Code Session ────────
+if [[ -n "${CLAUDECODE:-}" && "${1:-}" != "setup" && "${1:-}" != "update" && "${1:-}" != "backup" ]]; then
+  echo "ℹ️  lia: bereits in Claude Code Session — Autostart übersprungen"
+  echo "   Tipp: LIA_AUTOSTART=0 setzen um diese Meldung zu vermeiden"
+  exit 0
+fi
+
 # ── lia setup ────────────────────────────────────────────────────
 if [[ "${1:-}" == "setup" ]]; then
   echo ""
@@ -281,6 +288,14 @@ auto_update() {
 
   if [[ "$remote_ver" == "$installed_ver" ]]; then
     log "INFO" "Auto-Update: Aktuell (${installed_ver})"
+    return 0
+  fi
+
+  # Nur updaten wenn remote NEUER ist (verhindert Downgrade)
+  local newer
+  newer=$(printf "%s\n%s" "$installed_ver" "$remote_ver" | sort -V | tail -1)
+  if [[ "$newer" != "$remote_ver" ]]; then
+    log "INFO" "Auto-Update: Lokal (${installed_ver}) ist neuer als Remote (${remote_ver}) — kein Downgrade"
     return 0
   fi
 

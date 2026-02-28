@@ -7,6 +7,24 @@ Format: `MAJOR.MINOR.PATCH`
 
 ---
 
+## [1.7.2] — 2026-02-28
+
+### Bugfix
+- Autostart aus `/etc/profile.d/lily-agent.sh` entfernt — `lia` kann nicht innerhalb einer laufenden Claude Code Session starten (nested session crash)
+- Nur noch Alias `lia=lily-agent` wird gesetzt
+- Downgrade-Schutz im Auto-Update: lokale Version neuer als Remote → kein Update
+- Reinstall-Log: zeigt korrekt "Lokal ist aktueller" statt falschem Update-Hinweis
+
+---
+
+## [1.7.2] — 2026-02-28
+
+### Bugfix
+- Guard gegen Nested Claude Code Session: `lia` erkennt `$CLAUDECODE` und bricht sauber ab statt Fehlermeldung
+- Autostart in `/etc/profile.d/lily-agent.sh` funktioniert jetzt korrekt — kein "cannot be launched inside another session" mehr
+
+---
+
 ## [1.7.1] — 2025-03-01
 
 ### Bugfix (Blocker)

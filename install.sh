@@ -204,16 +204,8 @@ if ! command -v inotifywait &>/dev/null; then
 fi
 
 PROFILE_D="/etc/profile.d/lily-agent.sh"
-if ! grep -q "# Lily Agent Autostart" "$PROFILE_D" 2>/dev/null; then
-  cat > "$PROFILE_D" <<'PROFILE'
-alias lia='lily-agent'
-
-# Lily Agent Autostart — nur in interaktiven Shells, kein Doppelstart
-if [ -n "${PS1:-}" ] && [ "${LIA_AUTOSTART:-1}" = "1" ] && [ -z "${LIA_STARTED:-}" ]; then
-  export LIA_STARTED=1
-  lia
-fi
-PROFILE
+if ! grep -q "alias lia=" "$PROFILE_D" 2>/dev/null; then
+  echo "alias lia='lily-agent'" > "$PROFILE_D"
   chmod +x "$PROFILE_D"
 fi
 
@@ -224,9 +216,14 @@ echo "[$(date '+%H:%M:%S')] ✅ Reinstall abgeschlossen — lily-agent v${VERSIO
 REMOTE_VER=$(curl -sf --max-time 5   "https://raw.githubusercontent.com/smarthomelily/lily-agent/main/VERSION"   2>/dev/null | tr -d '[:space:]')
 
 if [[ -n "$REMOTE_VER" && "$REMOTE_VER" != "$VERSION" ]]; then
-  echo ""
-  echo "[$(date '+%H:%M:%S')] ℹ️  Update verfügbar: v${VERSION} → v${REMOTE_VER}"
-  echo "                     Wird automatisch beim nächsten 'lia' geladen."
+  NEWER=$(printf "%s\n%s" "$VERSION" "$REMOTE_VER" | sort -V | tail -1)
+  if [[ "$NEWER" == "$REMOTE_VER" ]]; then
+    echo ""
+    echo "[$(date '+%H:%M:%S')] ℹ️  Update verfügbar: v${VERSION} → v${REMOTE_VER}"
+    echo "                     Wird automatisch beim nächsten 'lia' geladen."
+  else
+    echo "[$(date '+%H:%M:%S')] ✅ Lokal (v${VERSION}) ist aktueller als Remote (v${REMOTE_VER})"
+  fi
 elif [[ -n "$REMOTE_VER" ]]; then
   echo "[$(date '+%H:%M:%S')] ✅ Aktuell (v${VERSION})"
 fi
@@ -285,18 +282,10 @@ fi
 
 # Alpine Linux: /etc/profile.d/ statt /root/.bashrc
 PROFILE_D="/etc/profile.d/lily-agent.sh"
-if ! grep -q "# Lily Agent Autostart" "$PROFILE_D" 2>/dev/null; then
-  cat > "$PROFILE_D" <<'PROFILE'
-alias lia='lily-agent'
-
-# Lily Agent Autostart — nur in interaktiven Shells, kein Doppelstart
-if [ -n "${PS1:-}" ] && [ "${LIA_AUTOSTART:-1}" = "1" ] && [ -z "${LIA_STARTED:-}" ]; then
-  export LIA_STARTED=1
-  lia
-fi
-PROFILE
+if ! grep -q "alias lia=" "$PROFILE_D" 2>/dev/null; then
+  echo "alias lia='lily-agent'" > "$PROFILE_D"
   chmod +x "$PROFILE_D"
-  ts "✅ Alias + Autostart eingetragen (/etc/profile.d/lily-agent.sh)"
+  ts "✅ Alias eingetragen (/etc/profile.d/lily-agent.sh)"
 fi
 STATUS["Alias"]="✅"
 
