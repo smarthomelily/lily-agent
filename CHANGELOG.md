@@ -7,6 +7,35 @@ Format: `MAJOR.MINOR.PATCH`
 
 ---
 
+## [1.7.1] — 2025-03-01
+
+### Bugfix (Blocker)
+- Alpine Linux Kompatibilität: `/root/.bashrc` existiert nicht auf HAOS
+- Alias + Autostart werden jetzt in `/etc/profile.d/lily-agent.sh` geschrieben
+- `[[ ]]` → `[ ]` im Autostart-Block (ash-kompatibel)
+- Gilt für Installer (Schritt 8) und reinstall.sh
+
+---
+
+## [1.7.0] — 2025-03-01
+
+### Neu
+- `lia setup` — interaktiver Telegram + Hostname Konfigurator mit Testnachricht
+  - Zeigt aktuellen Hostname an, erlaubt Überschreiben
+  - Bestehende Werte bleiben erhalten (Enter zum Behalten)
+  - Schickt Testnachricht und zeigt Ergebnis
+- Installer: Telegram-Eingabe entfernt — kein Blockieren mehr bei `curl | bash`
+- Installer: Hinweis auf `lia setup` in Zusammenfassung
+
+---
+
+## [1.6.8] — 2025-03-01
+
+### Neu
+- `HOSTNAME_OVERRIDE` in `/etc/lily-notify.conf` — überschreibt den automatisch erkannten Hostname in allen Telegram-Nachrichten
+
+---
+
 ## [1.6.7] — 2025-03-01
 
 ### Fixes

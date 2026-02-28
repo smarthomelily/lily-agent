@@ -81,7 +81,7 @@ lia update --settings # Security-Policy manuell aktualisieren
   ├── SMARTHOMELILY_FRAMEWORK.md
   ├── settings.json
   ├── lily-notify.conf
-  ├── installed_version                  # "1.6.7"
+  ├── installed_version                  # "1.6.3"
   ├── last_update_check                  # Unix-Timestamp
   └── reinstall.sh                       # Via HA-Automation nach Neustart
 /config/logs/lily-agent/                 # Session-Logs (90 Tage Retention)
@@ -128,4 +128,4 @@ Semantic Versioning: `MAJOR.MINOR.PATCH` — siehe [CHANGELOG.md](CHANGELOG.md)
 
 ## Lizenz
 
-GPL-3.0 — [smarthomelily](https://github.com/smarthomelily)
+MIT — [smarthomelily](https://github.com/smarthomelily)

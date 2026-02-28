@@ -40,29 +40,12 @@ STATUS["Verzeichnisse"]="✅"
 ts "── Schritt 2: Telegram"
 
 if [[ -f /etc/lily-notify.conf ]]; then
-  wrn "lily-notify.conf existiert bereits — wird nicht überschrieben"
+  ts "✅ lily-notify.conf vorhanden"
   STATUS["Telegram"]="✅ vorhanden"
+  cp /etc/lily-notify.conf "${STATE_DIR}/lily-notify.conf"
 else
-  echo ""
-  echo "Telegram Bot Token und Chat ID eingeben."
-  echo "Leer lassen + Enter zum Überspringen."
-  echo ""
-  read -rsp "  Bot Token: " BOT_TOKEN; echo ""
-  read -rsp "  Chat ID:   " CHAT_ID; echo ""
-
-  if [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]]; then
-    cat > /etc/lily-notify.conf << CONF
-TELEGRAM_BOT_TOKEN="${BOT_TOKEN}"
-TELEGRAM_CHAT_ID="${CHAT_ID}"
-CONF
-    chmod 600 /etc/lily-notify.conf
-    cp /etc/lily-notify.conf "${STATE_DIR}/lily-notify.conf"
-    ts "✅ Telegram konfiguriert"
-    STATUS["Telegram"]="✅ konfiguriert"
-  else
-    wrn "Telegram übersprungen — später in /etc/lily-notify.conf eintragen"
-    STATUS["Telegram"]="⚠️ nicht konfiguriert"
-  fi
+  ts "  ℹ️  Telegram noch nicht konfiguriert — nach Install: lia setup"
+  STATUS["Telegram"]="⚠️ → lia setup"
 fi
 
 # ── 3. Abhängigkeiten ────────────────────────────────────────────
@@ -220,16 +203,18 @@ if ! command -v inotifywait &>/dev/null; then
     echo "[$(date '+%H:%M:%S')] ✅ inotify-tools installiert" || true
 fi
 
-if ! grep -q "# Lily Agent Autostart" /root/.bashrc 2>/dev/null; then
-  cat >> /root/.bashrc <<'BASHRC'
+PROFILE_D="/etc/profile.d/lily-agent.sh"
+if ! grep -q "# Lily Agent Autostart" "$PROFILE_D" 2>/dev/null; then
+  cat > "$PROFILE_D" <<'PROFILE'
 alias lia='lily-agent'
 
 # Lily Agent Autostart — nur in interaktiven Shells, kein Doppelstart
-if [[ -n "${PS1:-}" && "${LIA_AUTOSTART:-1}" == "1" && -z "${LIA_STARTED:-}" ]]; then
+if [ -n "${PS1:-}" ] && [ "${LIA_AUTOSTART:-1}" = "1" ] && [ -z "${LIA_STARTED:-}" ]; then
   export LIA_STARTED=1
   lia
 fi
-BASHRC
+PROFILE
+  chmod +x "$PROFILE_D"
 fi
 
 VERSION=$(grep "^VERSION=" /usr/local/bin/lily-agent 2>/dev/null | cut -d'"' -f2 || echo "?")
@@ -298,17 +283,20 @@ fi
 
 # ── 8. Alias ─────────────────────────────────────────────────────
 
-if ! grep -q "# Lily Agent Autostart" /root/.bashrc 2>/dev/null; then
-  cat >> /root/.bashrc <<'BASHRC'
+# Alpine Linux: /etc/profile.d/ statt /root/.bashrc
+PROFILE_D="/etc/profile.d/lily-agent.sh"
+if ! grep -q "# Lily Agent Autostart" "$PROFILE_D" 2>/dev/null; then
+  cat > "$PROFILE_D" <<'PROFILE'
 alias lia='lily-agent'
 
 # Lily Agent Autostart — nur in interaktiven Shells, kein Doppelstart
-if [[ -n "${PS1:-}" && "${LIA_AUTOSTART:-1}" == "1" && -z "${LIA_STARTED:-}" ]]; then
+if [ -n "${PS1:-}" ] && [ "${LIA_AUTOSTART:-1}" = "1" ] && [ -z "${LIA_STARTED:-}" ]; then
   export LIA_STARTED=1
   lia
 fi
-BASHRC
-  ts "✅ Alias + Autostart eingetragen"
+PROFILE
+  chmod +x "$PROFILE_D"
+  ts "✅ Alias + Autostart eingetragen (/etc/profile.d/lily-agent.sh)"
 fi
 STATUS["Alias"]="✅"
 
@@ -343,9 +331,12 @@ for key in "Verzeichnisse" "Telegram" "Abhängigkeiten" "Download" "Policy" "Per
 done
 echo ""
 echo "  Verwendung:"
-echo "    source /root/.bashrc"
+echo "    source /etc/profile.d/lily-agent.sh"
 echo "    lia                   → Lily Agent starten"
 echo "    lia backup            → Pre-Session Backup"
 echo ""
 echo "  Auto-Update: täglich von github.com/smarthomelily/lily-agent"
+echo ""
+echo "  Nächster Schritt:"
+echo "    lia setup             → Telegram + Hostname konfigurieren"
 echo ""

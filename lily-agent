@@ -7,7 +7,7 @@
 #   - Dateiänderungen überwachen (inotifywait)
 #   - Idle-Watchdog: Addon stopp nach 10 Min ohne Aktivität
 
-VERSION="1.6.7"  # Increment on every change: MAJOR.MINOR.PATCH
+VERSION="1.7.1"  # Increment on every change: MAJOR.MINOR.PATCH
 GITHUB_REPO="smarthomelily/lily-agent"
 
 # ── Konfiguration ────────────────────────────────────────────────────────────
@@ -30,6 +30,10 @@ HOSTNAME=$(curl -s -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
   http://supervisor/host/info 2>/dev/null \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['hostname'])" \
   2>/dev/null || hostname)
+
+# HOSTNAME_OVERRIDE: in /etc/lily-notify.conf eintragen um Hostname zu überschreiben
+_OVERRIDE=$(grep "^HOSTNAME_OVERRIDE=" /etc/lily-notify.conf 2>/dev/null | cut -d'=' -f2-)
+[[ -n "$_OVERRIDE" ]] && HOSTNAME="$_OVERRIDE"
 
 SESSION_START=$(date "+%Y-%m-%d %H:%M:%S")
 SESSION_STAMP=$(date "+%Y-%m-%d_%H-%M-%S")
@@ -181,6 +185,71 @@ fi
 
 # ── Auto-Update (1x täglich von GitHub) ──────────────────────────────────────
 # Source: https://github.com/smarthomelily/lily-agent
+
+# ── lia setup ────────────────────────────────────────────────────
+if [[ "${1:-}" == "setup" ]]; then
+  echo ""
+  echo "════════════════════════════════════════════════════════════"
+  echo "  lily-agent Setup — Telegram + Hostname"
+  echo "════════════════════════════════════════════════════════════"
+  echo ""
+
+  # Aktuellen Hostname anzeigen
+  CURRENT_HOST=$(curl -s -H "Authorization: Bearer ${SUPERVISOR_TOKEN}"     http://supervisor/host/info 2>/dev/null     | python3 -c "import sys,json; print(json.load(sys.stdin)['''data'''][''hostname''])"     2>/dev/null || hostname)
+  CURRENT_OVERRIDE=$(grep "^HOSTNAME_OVERRIDE=" /etc/lily-notify.conf 2>/dev/null | cut -d= -f2-)
+
+  echo "  Aktueller Hostname : ${CURRENT_HOST}"
+  [[ -n "$CURRENT_OVERRIDE" ]] && echo "  Override aktiv     : ${CURRENT_OVERRIDE}"
+  echo ""
+  read -rp "  Hostname (Enter = ${CURRENT_OVERRIDE:-$CURRENT_HOST}): " NEW_HOST
+
+  # Telegram eingeben
+  CURRENT_TOKEN=$(grep "^TELEGRAM_BOT_TOKEN=" /etc/lily-notify.conf 2>/dev/null | cut -d= -f2-)
+  CURRENT_CHAT=$(grep "^TELEGRAM_CHAT_ID=" /etc/lily-notify.conf 2>/dev/null | cut -d= -f2-)
+
+  echo ""
+  [[ -n "$CURRENT_TOKEN" ]] && echo "  Bot Token bereits gesetzt (Enter zum Behalten)"
+  read -rsp "  Telegram Bot Token: " NEW_TOKEN; echo ""
+  read -rsp "  Telegram Chat ID:   " NEW_CHAT; echo ""
+
+  # Werte zusammenführen
+  FINAL_TOKEN="${NEW_TOKEN:-$CURRENT_TOKEN}"
+  FINAL_CHAT="${NEW_CHAT:-$CURRENT_CHAT}"
+  FINAL_HOST="${NEW_HOST:-${CURRENT_OVERRIDE:-$CURRENT_HOST}}"
+
+  if [[ -z "$FINAL_TOKEN" || -z "$FINAL_CHAT" ]]; then
+    echo ""
+    echo "❌ Token und Chat ID erforderlich — abgebrochen."
+    exit 1
+  fi
+
+  # lily-notify.conf schreiben
+  {
+    echo "TELEGRAM_BOT_TOKEN=${FINAL_TOKEN}"
+    echo "TELEGRAM_CHAT_ID=${FINAL_CHAT}"
+    [[ "$FINAL_HOST" != "$CURRENT_HOST" ]] && echo "HOSTNAME_OVERRIDE=${FINAL_HOST}"
+  } > /etc/lily-notify.conf
+  chmod 600 /etc/lily-notify.conf
+  cp /etc/lily-notify.conf /config/.lily-agent/lily-notify.conf 2>/dev/null || true
+
+  echo ""
+  echo "✅ Konfiguration gespeichert"
+  echo "   Hostname : ${FINAL_HOST}"
+  echo ""
+
+  # Testnachricht
+  echo "📨 Sende Testnachricht..."
+  RESULT=$(curl -s -X POST     "https://api.telegram.org/bot${FINAL_TOKEN}/sendMessage"     -d "chat_id=${FINAL_CHAT}"     -d "parse_mode=HTML"     -d "text=🧪 <b>${FINAL_HOST}</b> — lily-agent Telegram-Test ✅")
+
+  if echo "$RESULT" | grep -q '"ok":true'; then
+    echo "✅ Testnachricht erfolgreich gesendet"
+  else
+    echo "❌ Testnachricht fehlgeschlagen — Token/Chat ID prüfen"
+    echo "   $RESULT"
+  fi
+  echo ""
+  exit 0
+fi
 
 GITHUB_RAW="https://raw.githubusercontent.com/smarthomelily/lily-agent/main"
 STATE_DIR="/config/.lily-agent"
