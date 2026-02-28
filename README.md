@@ -81,7 +81,7 @@ lia update --settings # Security-Policy manuell aktualisieren
   ├── SMARTHOMELILY_FRAMEWORK.md
   ├── settings.json
   ├── lily-notify.conf
-  ├── installed_version                  # "1.6.3"
+  ├── installed_version                  # "1.6.7"
   ├── last_update_check                  # Unix-Timestamp
   └── reinstall.sh                       # Via HA-Automation nach Neustart
 /config/logs/lily-agent/                 # Session-Logs (90 Tage Retention)
