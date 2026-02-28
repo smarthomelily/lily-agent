@@ -40,7 +40,7 @@ Der Wrapper prüft **einmal täglich** ob eine neue Version verfügbar ist.
 Bei Update: alle Komponenten werden automatisch ersetzt, Telegram-Benachrichtigung, Wrapper-Neustart.
 
 ```
-🔄 mein-ha-system — Update 1.6.x → 1.6.7
+🔄 mein-ha-system — Update 1.7.x → 1.7.2
 ```
 
 Policy (`settings.json`) wird **nie** automatisch aktualisiert — nur explizit:
@@ -81,7 +81,7 @@ lia update --settings # Security-Policy manuell aktualisieren
   ├── SMARTHOMELILY_FRAMEWORK.md
   ├── settings.json
   ├── lily-notify.conf
-  ├── installed_version                  # "1.6.3"
+  ├── installed_version                  # "1.7.2"
   ├── last_update_check                  # Unix-Timestamp
   └── reinstall.sh                       # Via HA-Automation nach Neustart
 /config/logs/lily-agent/                 # Session-Logs (90 Tage Retention)
@@ -97,7 +97,7 @@ lia update --settings # Security-Policy manuell aktualisieren
 | Ende (OK) | `✅ hostname — 12m 34s` + Dateiliste |
 | Ende (Fehler) | `❌ hostname — 3m 12s` |
 | Idle-Timeout | `⏸ hostname — Idle 10min — gestoppt` |
-| Update | `🔄 hostname — Update 1.6.x → 1.6.7` |
+| Update | `🔄 hostname — Update 1.7.x → 1.7.2` |
 | Backup | `💾 hostname — pre-session_... \| 420 MB` |
 
 ---
