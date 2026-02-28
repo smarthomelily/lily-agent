@@ -1,0 +1,521 @@
+#!/bin/bash
+# lily-agent — Claude Code Wrapper für betreute Systeme
+# Funktionen:
+#   - Pre-Flight Check: Speicher + RAM vor Session-Start
+#   - Telegram-Benachrichtigung bei Start/Ende mit Dateiliste + Diff-Stat
+#   - Session-Log unter /config/logs/lily-agent/
+#   - Dateiänderungen überwachen (inotifywait)
+#   - Idle-Watchdog: Addon stopp nach 10 Min ohne Aktivität
+
+VERSION="1.6.7"  # Increment on every change: MAJOR.MINOR.PATCH
+GITHUB_REPO="smarthomelily/lily-agent"
+
+# ── Konfiguration ────────────────────────────────────────────────────────────
+source /etc/lily-notify.conf 2>/dev/null || true
+
+BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-DEIN_BOT_TOKEN_HIER}"
+CHAT_ID="${TELEGRAM_CHAT_ID:-DEINE_CHAT_ID_HIER}"
+OPERATOR="smarthomelily"
+LOG_DIR="/config/logs/lily-agent"
+WATCH_DIR="/config"
+IDLE_TIMEOUT=600    # 10 Minuten in Sekunden
+IDLE_CHECK=60       # Prüfintervall: alle 60 Sekunden
+DISK_WARN=90        # Warnschwelle Speicher in %
+DISK_CRIT=95        # Kritische Schwelle — Abbruch
+RAM_WARN=90         # Warnschwelle RAM in %
+# ────────────────────────────────────────────────────────────────────────────
+
+# Fix: Supervisor-Hostname bevorzugen (Container-Hostname ist nicht aussagekräftig)
+HOSTNAME=$(curl -s -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+  http://supervisor/host/info 2>/dev/null \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['hostname'])" \
+  2>/dev/null || hostname)
+
+SESSION_START=$(date "+%Y-%m-%d %H:%M:%S")
+SESSION_STAMP=$(date "+%Y-%m-%d_%H-%M-%S")
+LOG_FILE="${LOG_DIR}/${SESSION_STAMP}_${HOSTNAME}.log"
+
+mkdir -p "$LOG_DIR"
+
+# ── Hilfsfunktionen ──────────────────────────────────────────────────────────
+
+log() {
+  echo "[$(date '+%H:%M:%S')] [${1}] ${2}" >> "$LOG_FILE"
+}
+
+send_telegram() {
+  curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+    -d chat_id="${CHAT_ID}" \
+    -d text="$1" \
+    -d parse_mode="HTML" \
+    > /dev/null 2>&1
+}
+
+# Addon-Slug automatisch ermitteln
+get_addon_slug() {
+  ha addons list --raw-json 2>/dev/null | \
+    python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    addons = data.get('data', {}).get('addons', [])
+    for a in addons:
+        name = a.get('name', '').lower()
+        slug = a.get('slug', '').lower()
+        if 'lily' in name or 'claude' in name or 'lily-agent' in slug or 'claude' in slug:
+            print(a['slug'])
+            break
+except:
+    pass
+" 2>/dev/null
+}
+
+# ── Pre-Flight Check ─────────────────────────────────────────────────────────
+
+check_system_health() {
+  local warnings=""
+
+  # Disk check: /config
+  local disk_usage
+  disk_usage=$(df /config | tail -1 | awk '{print $5}' | sed 's/%//')
+  local disk_free_mb
+  disk_free_mb=$(df -m /config | tail -1 | awk '{print $4}')
+
+  if [[ "$disk_usage" -ge "$DISK_CRIT" ]]; then
+    log "ERROR" "Speicherplatz kritisch: ${disk_usage}% belegt (${disk_free_mb}MB frei)"
+    send_telegram "🚨 <b>${HOSTNAME}</b> — Speicher kritisch (${disk_usage}%, ${disk_free_mb}MB frei) — Session abgebrochen"
+    exit 1
+  elif [[ "$disk_usage" -ge "$DISK_WARN" ]]; then
+    warnings="${warnings}⚠️ Speicher: ${disk_usage}% belegt (${disk_free_mb}MB frei)\n"
+    log "WARN" "Speicherplatz knapp: ${disk_usage}% belegt"
+  fi
+
+  # /tmp check
+  local tmp_usage
+  tmp_usage=$(df /tmp | tail -1 | awk '{print $5}' | sed 's/%//' 2>/dev/null || echo "0")
+  if [[ "$tmp_usage" -ge "$DISK_CRIT" ]]; then
+    log "ERROR" "/tmp kritisch: ${tmp_usage}% belegt"
+    send_telegram "🚨 <b>${HOSTNAME}</b> — /tmp kritisch (${tmp_usage}%) — Session abgebrochen"
+    exit 1
+  elif [[ "$tmp_usage" -ge "$DISK_WARN" ]]; then
+    warnings="${warnings}⚠️ /tmp: ${tmp_usage}% belegt\n"
+    log "WARN" "/tmp knapp: ${tmp_usage}% belegt"
+  fi
+
+  # RAM check
+  local ram_total ram_used ram_pct
+  ram_total=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+  ram_used=$(( ram_total - $(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2}') ))
+  if [[ -n "$ram_total" && "$ram_total" -gt 0 ]]; then
+    ram_pct=$(( ram_used * 100 / ram_total ))
+    local ram_free_mb=$(( (ram_total - ram_used) / 1024 ))
+    if [[ "$ram_pct" -ge "$RAM_WARN" ]]; then
+      warnings="${warnings}⚠️ RAM: ${ram_pct}% belegt (${ram_free_mb}MB frei)\n"
+      log "WARN" "RAM knapp: ${ram_pct}% belegt, ${ram_free_mb}MB frei"
+    fi
+  fi
+
+  # Warnungen per Telegram wenn vorhanden
+  if [[ -n "$warnings" ]]; then
+    send_telegram "⚠️ <b>${HOSTNAME}</b> — Pre-Flight: $(echo -e "$warnings" | tr '\n' ' ')"
+  fi
+
+  log "INFO" "Pre-Flight Check: OK (Disk: ${disk_usage}%, /tmp: ${tmp_usage}%)"
+}
+
+# ── Subcommands ──────────────────────────────────────────────────────────────
+
+if [[ "$1" == "update" && "$2" == "--settings" ]]; then
+  # Manuelles settings.json Update — explizite Zustimmung erforderlich
+  source /etc/lily-notify.conf 2>/dev/null || true
+  _RAW="https://raw.githubusercontent.com/smarthomelily/lily-agent/main"
+  echo "⚠️  settings.json (Security-Policy) wird von GitHub aktualisiert."
+  echo "    Quelle: ${_RAW}/settings.json"
+  read -rp "    Fortfahren? (ja/nein): " CONFIRM
+  if [[ "$CONFIRM" != "ja" ]]; then
+    echo "Abgebrochen."
+    exit 0
+  fi
+  TMP=$(mktemp)
+  if curl -sf --max-time 15 "${_RAW}/settings.json" -o "$TMP" 2>/dev/null; then
+    mv "$TMP" /root/.claude/settings.json
+    echo "✅ settings.json aktualisiert"
+  else
+    rm -f "$TMP"
+    echo "❌ Download fehlgeschlagen"
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "$1" == "backup" ]]; then
+  source /etc/lily-notify.conf 2>/dev/null || true
+  BACKUP_NAME="pre-session_$(date +%Y%m%d_%H%M%S)"
+  echo "⏳ Backup wird erstellt: ${BACKUP_NAME}"
+  curl -s -X POST \
+    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\": \"${BACKUP_NAME}\"}" \
+    http://supervisor/backups/new/full > /dev/null 2>&1
+  for i in $(seq 1 20); do
+    sleep 15
+    RESULT=$(curl -s -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" http://supervisor/backups | \
+      python3 -c "
+import sys, json
+b = [x for x in json.load(sys.stdin)['data']['backups'] if 'pre-session' in x.get('name','')]
+print(f\"{b[0]['name']} | {b[0].get('size','?')} MB\") if b else None
+" 2>/dev/null)
+    if [[ -n "$RESULT" ]]; then
+      echo "✅ Backup fertig: $RESULT"
+      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="${TELEGRAM_CHAT_ID}" -d parse_mode="HTML" \
+        -d text="💾 <b>Backup erstellt</b>
+🏠 <code>${HOSTNAME}</code> | 📦 ${RESULT}
+✅ Session kann beginnen" > /dev/null 2>&1
+      exit 0
+    fi
+  done
+  echo "❌ Backup-Timeout — bitte manuell prüfen"
+  exit 1
+fi
+
+# ── Auto-Update (1x täglich von GitHub) ──────────────────────────────────────
+# Source: https://github.com/smarthomelily/lily-agent
+
+GITHUB_RAW="https://raw.githubusercontent.com/smarthomelily/lily-agent/main"
+STATE_DIR="/config/.lily-agent"
+LAST_CHECK_FILE="${STATE_DIR}/last_update_check"
+INSTALLED_VER_FILE="${STATE_DIR}/installed_version"
+
+auto_update() {
+  # Höchstens 1x pro Tag prüfen
+  local now last_check elapsed
+  now=$(date +%s)
+  last_check=$(cat "$LAST_CHECK_FILE" 2>/dev/null || echo "0")
+  elapsed=$(( now - last_check ))
+  [[ $elapsed -lt 86400 ]] && return 0
+
+  # GitHub-Version abrufen (Timeout: 5s)
+  local remote_ver
+  remote_ver=$(curl -sf --max-time 5 "${GITHUB_RAW}/VERSION" 2>/dev/null | tr -d '[:space:]')
+
+  # Timestamp immer aktualisieren — auch wenn GitHub nicht erreichbar
+  echo "$now" > "$LAST_CHECK_FILE"
+
+  if [[ -z "$remote_ver" ]]; then
+    log "INFO" "Auto-Update: GitHub nicht erreichbar — übersprungen"
+    return 0
+  fi
+
+  local installed_ver
+  installed_ver=$(cat "$INSTALLED_VER_FILE" 2>/dev/null || echo "$VERSION")
+
+  if [[ "$remote_ver" == "$installed_ver" ]]; then
+    log "INFO" "Auto-Update: Aktuell (${installed_ver})"
+    return 0
+  fi
+
+  log "INFO" "Auto-Update: ${installed_ver} → ${remote_ver} — lade Komponenten..."
+
+  # Alle 4 Komponenten herunterladen
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  local failed=0
+
+  # settings.json wird NICHT automatisch aktualisiert — Policy bleibt lokal
+  # Manuelles Update: lia update --settings
+  for component in lily-agent CLAUDE.md SMARTHOMELILY_FRAMEWORK.md; do
+    if ! curl -sf --max-time 15 "${GITHUB_RAW}/${component}" \
+         -o "${tmp_dir}/${component}" 2>/dev/null; then
+      log "ERROR" "Auto-Update: Download fehlgeschlagen — ${component}"
+      failed=1
+      break
+    fi
+  done
+
+  if [[ $failed -eq 1 ]]; then
+    rm -rf "$tmp_dir"
+    log "ERROR" "Auto-Update: Abgebrochen — unvollständiger Download"
+    return 1
+  fi
+
+  # Atomisch installieren — alle Dateien erfolgreich bevor irgendwas ersetzt wird
+  cp "${tmp_dir}/lily-agent"                  /usr/local/bin/lily-agent
+  chmod +x                                    /usr/local/bin/lily-agent
+  cp "${tmp_dir}/lily-agent"                  "${STATE_DIR}/lily-agent"
+
+  cp "${tmp_dir}/CLAUDE.md"                   /config/CLAUDE.md
+  cp "${tmp_dir}/CLAUDE.md"                   "${STATE_DIR}/CLAUDE.md"
+
+  cp "${tmp_dir}/SMARTHOMELILY_FRAMEWORK.md"  /config/SMARTHOMELILY_FRAMEWORK.md
+  cp "${tmp_dir}/SMARTHOMELILY_FRAMEWORK.md"  "${STATE_DIR}/SMARTHOMELILY_FRAMEWORK.md"
+
+
+  echo "$remote_ver" > "$INSTALLED_VER_FILE"
+  rm -rf "$tmp_dir"
+
+  log "INFO" "Auto-Update: ${installed_ver} → ${remote_ver} ✅"
+  send_telegram "🔄 <b>${HOSTNAME}</b> — Update ${installed_ver} → ${remote_ver}"
+
+  # Wrapper neu starten mit neuer Version
+  exec /usr/local/bin/lily-agent "$@"
+}
+
+auto_update "$@"
+
+# ── Log-Header ───────────────────────────────────────────────────────────────
+
+cat >> "$LOG_FILE" << HEADER
+==============================================================================
+  Lily Agent Session Log
+==============================================================================
+  System   : ${HOSTNAME}
+  Operator : ${OPERATOR}
+  Version  : ${VERSION}
+  Start    : ${SESSION_START}
+  Log-Datei: ${LOG_FILE}
+==============================================================================
+
+HEADER
+
+log "SESSION" "START"
+
+# ── Pre-Flight ausführen ─────────────────────────────────────────────────────
+
+check_system_health
+
+# ── Addon-Slug ermitteln ─────────────────────────────────────────────────────
+
+ADDON_SLUG=$(get_addon_slug)
+if [[ -n "$ADDON_SLUG" ]]; then
+  log "INFO" "Addon-Slug ermittelt: ${ADDON_SLUG}"
+else
+  log "WARN" "Addon-Slug nicht ermittelt — Idle-Watchdog deaktiviert"
+fi
+
+# ── Git-Snapshot vor Session (für Diff-Stat) ─────────────────────────────────
+
+PRE_SESSION_COMMIT=""
+if command -v git &>/dev/null && [[ -d /config/.git ]]; then
+  # Sicherstellen dass alle aktuellen Änderungen committed sind für sauberen Diff
+  PRE_SESSION_COMMIT=$(git -C /config rev-parse HEAD 2>/dev/null || echo "")
+  log "INFO" "Git-Snapshot vor Session: ${PRE_SESSION_COMMIT:0:8}"
+fi
+
+# ── Telegram: Start ──────────────────────────────────────────────────────────
+
+send_telegram "🟢 <b>${HOSTNAME}</b> — Lily Agent gestartet | ${SESSION_START}"
+
+# ── Idle-Watchdog im Hintergrund ─────────────────────────────────────────────
+
+if [[ -n "$ADDON_SLUG" ]]; then
+  (
+    LAST_ACTIVITY=$(date +%s)
+    LAST_SIZE=0
+
+    while true; do
+      sleep "$IDLE_CHECK"
+
+      # Prüfen ob Hauptprozess noch läuft
+      if ! kill -0 $$ 2>/dev/null; then
+        exit 0
+      fi
+
+      # Log-Größe prüfen — Änderung = Aktivität
+      CURRENT_SIZE=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo "0")
+      if [[ "$CURRENT_SIZE" != "$LAST_SIZE" ]]; then
+        LAST_ACTIVITY=$(date +%s)
+        LAST_SIZE=$CURRENT_SIZE
+        continue
+      fi
+
+      # Idle-Zeit berechnen
+      NOW=$(date +%s)
+      IDLE=$(( NOW - LAST_ACTIVITY ))
+
+      if [[ $IDLE -ge $IDLE_TIMEOUT ]]; then
+        IDLE_MIN=$(( IDLE / 60 ))
+        log "WATCHDOG" "Idle seit ${IDLE_MIN} Min — stoppe Addon ${ADDON_SLUG}"
+
+        send_telegram "⏸ <b>${HOSTNAME}</b> — Idle ${IDLE_MIN}min — gestoppt"
+
+        ha addons stop "$ADDON_SLUG" 2>/dev/null
+        exit 0
+      fi
+    done
+  ) &
+  WATCHDOG_PID=$!
+  log "INFO" "Idle-Watchdog gestartet (PID ${WATCHDOG_PID}, Timeout ${IDLE_TIMEOUT}s)"
+fi
+
+# ── Dateiüberwachung im Hintergrund (inotifywait) ───────────────────────────
+
+if command -v inotifywait &>/dev/null; then
+  WATCH_DIRS=()
+  for d in automations scripts scenes configuration.yaml www custom_components packages blueprints; do
+    [[ -e "/config/$d" ]] && WATCH_DIRS+=("/config/$d")
+  done
+  [[ ${#WATCH_DIRS[@]} -eq 0 ]] && WATCH_DIRS=("$WATCH_DIR")
+
+  inotifywait -m -r \
+    -e modify,create,delete,moved_to,moved_from \
+    --format '%T [FILE] %e: %w%f' \
+    --timefmt '%H:%M:%S' \
+    --exclude '(\.git|/logs/|/backups/|\.storage|home-assistant_v2\.db|home-assistant\.log)' \
+    "${WATCH_DIRS[@]}" >> "$LOG_FILE" 2>/dev/null &
+  INOTIFY_PID=$!
+else
+  log "WARN" "inotifywait nicht installiert — Dateiüberwachung deaktiviert"
+  INOTIFY_PID=""
+fi
+
+# ── Lily Agent starten ───────────────────────────────────────────────────────
+# Fix: tee statt script (script nicht auf Alpine verfügbar)
+
+log "INFO" "Lily Agent wird gestartet mit Argumenten: $*"
+echo "" >> "$LOG_FILE"
+echo "── Terminal Output ────────────────────────────────────────────────────" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
+claude "$@" 2>&1 | tee -a "$LOG_FILE"
+EXIT_CODE=${PIPESTATUS[0]}
+
+# ── Hintergrundprozesse beenden ───────────────────────────────────────────────
+
+[[ -n "$WATCHDOG_PID" ]] && kill "$WATCHDOG_PID" 2>/dev/null && wait "$WATCHDOG_PID" 2>/dev/null
+[[ -n "$INOTIFY_PID" ]] && kill "$INOTIFY_PID" 2>/dev/null && wait "$INOTIFY_PID" 2>/dev/null
+
+# ── Session-Ende ─────────────────────────────────────────────────────────────
+
+SESSION_END=$(date "+%Y-%m-%d %H:%M:%S")
+SESSION_END_EPOCH=$(date +%s)
+SESSION_START_EPOCH=$(date -d "${SESSION_START}" +%s 2>/dev/null || \
+                     date -j -f "%Y-%m-%d %H:%M:%S" "${SESSION_START}" +%s 2>/dev/null || \
+                     echo "$SESSION_END_EPOCH")
+DURATION=$(( SESSION_END_EPOCH - SESSION_START_EPOCH ))
+DURATION_MIN=$(( DURATION / 60 ))
+DURATION_SEC=$(( DURATION % 60 ))
+
+# Fix: | tail -1 verhindert grep-c Mehrfachausgabe-Fehler
+CHANGED_FILES=$(grep -c "\[FILE\]" "$LOG_FILE" 2>/dev/null | tail -1)
+CHANGED_FILES=${CHANGED_FILES:-0}
+ERROR_COUNT=$(grep -c "\[ERROR\]" "$LOG_FILE" 2>/dev/null | tail -1)
+ERROR_COUNT=${ERROR_COUNT:-0}
+
+echo "" >> "$LOG_FILE"
+echo "── Session Ende ───────────────────────────────────────────────────────" >> "$LOG_FILE"
+log "SESSION" "END"
+cat >> "$LOG_FILE" << FOOTER
+
+==============================================================================
+  Ende     : ${SESSION_END}
+  Dauer    : ${DURATION_MIN}m ${DURATION_SEC}s
+  Exit-Code: ${EXIT_CODE}
+  Dateien  : ${CHANGED_FILES} Änderungen
+  Fehler   : ${ERROR_COUNT}
+==============================================================================
+FOOTER
+
+# ── Diff-Stat via Git ─────────────────────────────────────────────────────────
+
+DIFF_STAT=""
+if command -v git &>/dev/null && [[ -d /config/.git ]]; then
+  cd /config
+
+  # Safety: .gitignore muss .lily-agent/ + system-info.md enthalten
+  # Verhindert versehentlichen Commit von Credentials/Secrets
+  for IGNORE_ENTRY in ".lily-agent/" "system-info.md"; do
+    if ! grep -qxF "$IGNORE_ENTRY" /config/.gitignore 2>/dev/null; then
+      echo "$IGNORE_ENTRY" >> /config/.gitignore
+      log "INFO" "Git: .gitignore ergänzt um ${IGNORE_ENTRY}"
+    fi
+  done
+
+  # Silent mode: skip entire git block if nothing changed
+  GIT_STATUS=$(git status --porcelain 2>/dev/null)
+  if [[ -n "$GIT_STATUS" ]]; then
+    git add -A 2>/dev/null
+
+    # ── Config-Check Guard — kein Commit bei invalidem HA-Zustand ──
+    HA_CHECK=$(curl -s -X POST       -H "Authorization: Bearer ${SUPERVISOR_TOKEN}"       http://supervisor/core/check 2>/dev/null)
+    HA_VALID=$(echo "$HA_CHECK" | python3 -c       "import sys,json; print('ok' if json.load(sys.stdin).get('result')=='ok' else 'fail')"       2>/dev/null || echo "fail")
+
+    if [[ "$HA_VALID" != "ok" ]]; then
+      log "ERROR" "Config-Check fehlgeschlagen — Git-Commit verweigert: ${HA_CHECK}"
+      send_telegram "🚨 <b>${HOSTNAME}</b> — Config-Check fehlgeschlagen, kein Commit"
+      git reset HEAD 2>/dev/null  # Staged Changes zurücksetzen
+    else
+      # Diff-Stat: gegen Session-Start-Commit oder aktuell
+      if [[ -n "$PRE_SESSION_COMMIT" ]]; then
+        POST_COMMIT=$(git rev-parse HEAD 2>/dev/null)
+        if [[ "$PRE_SESSION_COMMIT" != "$POST_COMMIT" ]]; then
+          DIFF_STAT=$(git diff --stat "${PRE_SESSION_COMMIT}" HEAD 2>/dev/null | tail -1)
+        else
+          DIFF_STAT=$(git diff --stat --cached 2>/dev/null | tail -1)
+        fi
+      else
+        DIFF_STAT=$(git diff --stat --cached 2>/dev/null | tail -1)
+      fi
+
+      # Session-Commit (nur bei gültigem Config-Check)
+      CHANGED_IN_GIT=$(git diff --name-only --cached; git ls-files --others --exclude-standard)
+      if [[ -n "$CHANGED_IN_GIT" ]]; then
+        git commit -m "Session $(date '+%Y-%m-%d %H:%M') — $(echo "$CHANGED_IN_GIT" | wc -l) Datei(en)
+
+$(echo "$CHANGED_IN_GIT" | sed 's/^/- /')" > /dev/null 2>&1
+        log "INFO" "Git: Commit OK (Config-Check bestanden)"
+      fi
+    fi
+  else
+    log "INFO" "Git: keine Änderungen — Commit übersprungen"
+  fi
+fi
+
+# ── Telegram: Ende mit Dateiliste + Diff-Stat ────────────────────────────────
+
+STATUS_ICON="✅"
+[[ $ERROR_COUNT -gt 0 ]] && STATUS_ICON="⚠️"
+[[ $EXIT_CODE -ne 0 ]] && STATUS_ICON="❌"
+
+# Geänderte Dateien — nur Dateinamen, max 10, keine Backups/Logs
+CHANGED_FILE_LIST=$(grep "\[FILE\]" "$LOG_FILE" 2>/dev/null | \
+  grep -v "\.log\|backups/" | \
+  sed 's|.*/config/||;s/ *$//' | \
+  sort -u | head -10 | tr '\n' ' ' | sed 's/ $//')
+
+if [[ -n "$CHANGED_FILE_LIST" ]]; then
+  FILE_MSG="
+📝 <code>${CHANGED_FILE_LIST}</code>"
+else
+  FILE_MSG=" — keine Änderungen"
+fi
+
+send_telegram "${STATUS_ICON} <b>${HOSTNAME}</b> — ${DURATION_MIN}m ${DURATION_SEC}s${FILE_MSG}"
+
+# ── system-info.md: Letzte Session aktualisieren ──────────────────────────────
+
+SYSTEM_INFO="/config/system-info.md"
+if [[ -f "$SYSTEM_INFO" ]]; then
+  SESSIONS_ENTRY="- $(date '+%Y-%m-%d %H:%M') — Dauer: ${DURATION_MIN}m ${DURATION_SEC}s, Dateien: ${CHANGED_FILES}, Fehler: ${ERROR_COUNT}"
+  python3 -c "
+import sys
+entry = sys.argv[1]
+with open('/config/system-info.md', 'r') as f:
+    txt = f.read()
+section = '## Letzte Sessions'
+idx = txt.find(section)
+if idx != -1:
+    block_start = txt.find(chr(10), idx) + 1
+    rest = txt[block_start:]
+    lines = [l for l in rest.split(chr(10)) if l.startswith('- ')][:4]
+    lines.insert(0, entry)
+    txt = txt[:block_start] + chr(10).join(lines) + chr(10)
+    with open('/config/system-info.md', 'w') as f:
+        f.write(txt)
+" "$SESSIONS_ENTRY" 2>/dev/null || true
+fi
+
+# ── Alte Logs aufräumen (älter als 90 Tage) ──────────────────────────────────
+find "$LOG_DIR" -name "*.log" -mtime +90 -delete 2>/dev/null
+
+exit $EXIT_CODE
