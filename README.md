@@ -128,4 +128,4 @@ Semantic Versioning: `MAJOR.MINOR.PATCH` — siehe [CHANGELOG.md](CHANGELOG.md)
 
 ## Lizenz
 
-MIT — [smarthomelily](https://github.com/smarthomelily)
+GPL-3.0 — [smarthomelily](https://github.com/smarthomelily)
